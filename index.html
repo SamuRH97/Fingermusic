@@ -2,7 +2,7 @@
 <html lang="es">
 <head>
 <meta charset="utf-8" />
-<title>Hand Music — Dedos independientes + Auto-silencio</title>
+<title>Hand Music — Estable (auto-silencio + dedos fiables)</title>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 
 <!-- Tone.js (fallbacks) -->
@@ -34,6 +34,7 @@ html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font-family
 h1{margin:0 0 10px;font-size:20px}
 .row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 select,button,input[type="range"]{width:100%;padding:10px;border-radius:12px;border:1px solid #233047;background:#0f1725;color:var(--ink)}
+button.active{outline:2px solid var(--accent)}
 .legend{font-size:12px;color:var(--muted)}
 .metrics{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:10px}
 .metric{background:#0e1522;border:1px solid #1e2a3e;border-radius:12px;padding:8px 10px}
@@ -45,6 +46,7 @@ canvas#cv{position:absolute;inset:0;transform:scaleX(-1)} /* espejo también ove
 .banner{position:fixed;top:10px;left:50%;transform:translateX(-50%);background:#142136;border:1px solid #203050;padding:10px 14px;border-radius:10px;display:none;z-index:9999}
 .banner.show{display:block}
 kbd{background:#0e1522;border:1px solid #1e2a3e;border-radius:6px;padding:2px 6px;color:#b9c7da}
+.badge{font-size:12px;color:#b9c7da}
 </style>
 </head>
 <body>
@@ -52,10 +54,10 @@ kbd{background:#0e1522;border:1px solid #1e2a3e;border-radius:6px;padding:2px 6p
 
 <div class="app">
   <div class="panel">
-    <h1>Hand Music <span class="legend">— dedos por separado + auto-silencio</span></h1>
+    <h1>Hand Music <span class="legend">— estable / GitHub Pages</span></h1>
 
     <div class="row" role="tablist">
-      <button id="btnPiano">🎹 Piano (1)</button>
+      <button id="btnPiano" class="active">🎹 Piano (1)</button>
       <button id="btnViolin">🎻 Violín (2)</button>
       <button id="btnSynth">🎛️ Synth (3)</button>
     </div>
@@ -82,8 +84,8 @@ kbd{background:#0e1522;border:1px solid #1e2a3e;border-radius:6px;padding:2px 6p
     </div>
 
     <div class="row" style="margin-top:10px">
-      <button id="btnPanic">🔇 Pánico (silencio)</button>
-      <button id="btnDiag">Diagnóstico</button>
+      <button id="btnPanic">🔇 Pánico</button>
+      <span class="badge">Manos: <span id="handsC">0</span> · Instrumento: <span id="instLbl">Piano</span></span>
     </div>
 
     <div class="metrics">
@@ -93,7 +95,7 @@ kbd{background:#0e1522;border:1px solid #1e2a3e;border-radius:6px;padding:2px 6p
     </div>
 
     <p class="legend" style="margin-top:8px">
-      Consejos: buena luz, manos a 40–70 cm. Atajos: <kbd>1</kbd>/<kbd>2</kbd>/<kbd>3</kbd> instrumento, <kbd>Espacio</kbd> cámara.
+      Si no suelta la cámara: candado → Cámara: Permitir. Cierra Zoom/Teams/OBS. Atajos: <kbd>1</kbd>/<kbd>2</kbd>/<kbd>3</kbd> instrumento, <kbd>Espacio</kbd> cámara.
     </p>
   </div>
 
@@ -105,55 +107,37 @@ kbd{background:#0e1522;border:1px solid #1e2a3e;border-radius:6px;padding:2px 6p
 
 <!-- MediaPipe Hands dinámico con fallbacks -->
 <script>
-/* ===== Helpers y estado ===== */
+/* ===== Helpers/estado ===== */
 const set=(id,t)=>document.getElementById(id).textContent=t;
 const banner=(t)=>{const b=document.getElementById('banner');b.textContent=t;b.className='banner show';setTimeout(()=>b.className='banner',6000);}
 const clamp=(v,a,b)=>Math.min(b,Math.max(a,v));
 const ema=(p,c,a)=>p==null?c:p+a*(c-p);
 const midiToFreq=m=>440*Math.pow(2,(m-69)/12);
-const xScreen = x => 1 - x; // compensar espejo para la lógica
+const xScreen = x => 1 - x; // compensar espejo para lógica
 const scales={major:[0,2,4,5,7,9,11],minor:[0,2,3,5,7,8,10],pent:[0,2,4,7,9]};
 const quant=(m,s)=>{if(s==='free')return m;const r=60,st=Math.round(m)-r,oct=Math.floor(st/12),w=((st%12)+12)%12,al=scales[s];let best=al[0],d=99;for(const x of al){const dd=Math.abs(w-x);if(dd<d){d=dd;best=x}}return r+oct*12+best};
 
-const FINGERS = {
-  index: {tip:8, pip:6, mcp:5},
-  middle:{tip:12,pip:10,mcp:9},
-  ring:  {tip:16,pip:14,mcp:13},
-  pinky: {tip:20,pip:18,mcp:17},
-  thumb: {tip:4, pip:3, mcp:2} // lo usamos menos para piano
-};
+const FINGERS={index:{tip:8,pip:6,mcp:5},middle:{tip:12,pip:10,mcp:9},ring:{tip:16,pip:14,mcp:13},pinky:{tip:20,pip:18,mcp:17},thumb:{tip:4,pip:3,mcp:2}};
+function isExtended(lm,f){const tip=lm[FINGERS[f].tip], pip=lm[FINGERS[f].pip]; return tip.y < pip.y - 0.01;}
+function palmWidth(lm){ const a=lm[5], b=lm[17]; return Math.hypot(a.x-b.x, a.y-b.y); }
+const fingerKey=(hand,f)=>hand+'_'+f;
 
+/* ===== Estado runtime ===== */
 const state={
-  instr:'piano',
-  scale:'major',
-  running:false,
-  pinch:0.32,
-  notes:new Map(),            // key -> {m,i}
-  hands:[makeHandState(),makeHandState()], // por mano
-  alpha:0.7,
-  smoothed:[[],[]],
+  instr:'piano', scale:'major', running:false, pinch:0.32,
+  notes:new Map(),
+  hands:[mkHand(),mkHand()],
+  alpha:0.7, smoothed:[[],[]],
   ft:[], last:performance.now(),
-  lastSeen:0
+  lastActive:0, emptyFrames:0
 };
-function makeHandState(){
-  return {
-    fingers:{
-      index:{down:false,lastY:0,note:null},
-      middle:{down:false,lastY:0,note:null},
-      ring:{down:false,lastY:0,note:null},
-      pinky:{down:false,lastY:0,note:null}
-    }
-  };
-}
+function mkHand(){ return {fingers:{index:{down:false,lastY:0}, middle:{down:false,lastY:0}, ring:{down:false,lastY:0}, pinky:{down:false,lastY:0}}}; }
 
-/* ===== Audio (Tone.js) ===== */
+/* ===== Audio ===== */
 let audio={started:false,ctx:null,piano:null,violin:null,synth:null};
-async function ensureTone(){
-  if (window.Tone) return true;
-  banner('No cargó Tone.js (desactiva bloqueadores o prueba incógnito)'); return false;
-}
+async function ensureTone(){ if(window.Tone) return true; banner('No cargó Tone.js (bloqueadores/CDN)'); return false; }
 async function initAudio(){
-  if (audio.started) return true;
+  if(audio.started) return true;
   const ok=await ensureTone(); if(!ok) return false;
   await Tone.start(); audio.ctx=Tone.context.rawContext;
   const bus=new Tone.Gain(1).toDestination();
@@ -162,30 +146,18 @@ async function initAudio(){
   audio.synth=new Tone.PolySynth(Tone.DuoSynth,{maxPolyphony:12,volume:-4}).connect(bus);
   audio.started=true; return true;
 }
-function noteOn(key,m,vel=100,i='piano'){
-  if(!audio.started) return;
-  const f=midiToFreq(m);
-  (i==='piano'?audio.piano:i==='synth'?audio.synth:audio.violin).triggerAttack(f, Tone.now(), vel/127);
-  state.notes.set(key,{m,i});
-  set('notes', state.notes.size);
-}
-function noteOff(key){
-  if(!audio.started) return;
-  const n=state.notes.get(key); if(!n) return;
-  const f=midiToFreq(n.m);
-  (n.i==='piano'?audio.piano:n.i==='synth'?audio.synth:audio.violin).triggerRelease(f, Tone.now()+0.001);
-  state.notes.delete(key);
-  set('notes', state.notes.size);
-}
-function panic(){ for(const [k] of state.notes) noteOff(k); }
+function noteOn(key,m,vel=100,i='piano'){ if(!audio.started) return; const f=midiToFreq(m); (i==='piano'?audio.piano:i==='synth'?audio.synth:audio.violin).triggerAttack(f, Tone.now(), vel/127); state.notes.set(key,{m,i}); set('notes',state.notes.size); }
+function noteOff(key){ if(!audio.started) return; const n=state.notes.get(key); if(!n) return; const f=midiToFreq(n.m); (n.i==='piano'?audio.piano:n.i==='synth'?audio.synth:audio.violin).triggerRelease(f, Tone.now()+0.001); state.notes.delete(key); set('notes',state.notes.size); }
+function allOff(){ for(const [k] of state.notes) noteOff(k); }
+function setInstr(n){ state.instr=n; ['btnPiano','btnViolin','btnSynth'].forEach(id=>document.getElementById(id).classList.remove('active')); if(n==='piano')btnPiano.classList.add('active'); if(n==='violin')btnViolin.classList.add('active'); if(n==='synth')btnSynth.classList.add('active'); set('instLbl', n[0].toUpperCase()+n.slice(1)); allOff(); }
 
-/* ===== MediaPipe Hands ===== */
+/* ===== MediaPipe ===== */
 let mpBase='', HandsRef=null, mpHands=null;
-async function loadScript(src){return new Promise((res,rej)=>{const s=document.createElement('script');s.src=src;s.onload=res;s.onerror=()=>rej(src);document.head.appendChild(s)})}
+async function loadScript(u){return new Promise((res,rej)=>{const s=document.createElement('script');s.src=u;s.onload=res;s.onerror=()=>rej(u);document.head.appendChild(s)})}
 async function ensureHands(){
-  if (window.Hands){ HandsRef=window.Hands; return true; }
+  if(window.Hands){HandsRef=window.Hands;return true;}
   const bases=['https://cdn.jsdelivr.net/npm/@mediapipe/hands','https://unpkg.com/@mediapipe/hands'];
-  for (const b of bases){ try{ await loadScript(b+'/hands.min.js'); mpBase=b; HandsRef=window.Hands; return true; }catch(e){} }
+  for(const b of bases){ try{ await loadScript(b+'/hands.min.js'); mpBase=b; HandsRef=window.Hands; return true; }catch(e){} }
   banner('MediaPipe no cargó (CDN bloqueado)'); return false;
 }
 
@@ -198,193 +170,148 @@ window.addEventListener('resize', resize);
 async function listCams(){ if(!navigator.mediaDevices?.enumerateDevices) return; const devs=await navigator.mediaDevices.enumerateDevices(); const cams=devs.filter(d=>d.kind==='videoinput'); const sel=document.getElementById('camSel'); sel.innerHTML='<option value="">(predeterminada)</option>'; cams.forEach(c=>{const o=document.createElement('option');o.value=c.deviceId;o.textContent=c.label||'Cámara'; sel.appendChild(o);}); }
 
 async function startCam(){
-  const okAudio=await initAudio(); const okHands=await ensureHands(); if(!okAudio) return;
+  const okA=await initAudio(); const okH=await ensureHands(); if(!okA) return;
   const deviceId=document.getElementById('camSel').value;
   try{
-    stream=await navigator.mediaDevices.getUserMedia({video: deviceId?{deviceId:{exact:deviceId}}:{facingMode:'user'},audio:false});
+    stream=await navigator.mediaDevices.getUserMedia({video: deviceId?{deviceId:{exact:deviceId}}:{facingMode:'user'}, audio:false});
     video.srcObject=stream; await video.play(); state.running=true; resize();
-
-    if (!mpHands && okHands && HandsRef){
+    if(!mpHands && okH && HandsRef){
       mpHands=new HandsRef({ locateFile:(f)=> (mpBase||'https://cdn.jsdelivr.net/npm/@mediapipe/hands')+'/'+f });
-      mpHands.setOptions({ maxNumHands:2, modelComplexity:1, minDetectionConfidence:0.7, minTrackingConfidence:0.7 });
+      mpHands.setOptions({ maxNumHands:2, modelComplexity:1, minDetectionConfidence:0.75, minTrackingConfidence:0.7 });
       mpHands.onResults(onResults);
     }
     const loop=async()=>{ if(!state.running) return; try{ if(mpHands) await mpHands.send({image:video}); }catch{} raf=requestAnimationFrame(loop); };
     cancelAnimationFrame(raf); raf=requestAnimationFrame(loop);
   }catch(e){ banner('Cámara: '+e.name); }
 }
-function stopCam(){ try{ if(stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; } }catch{} cancelAnimationFrame(raf); state.running=false; panic(); }
+function stopCam(){ try{ if(stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; } }catch{} cancelAnimationFrame(raf); state.running=false; allOff(); }
 
-/* ===== Piano: lógica dedo a nota ===== */
-function isExtended(lm, f){ // dedo extendido vs recogido (simple: tip por encima de PIP)
-  const tip=lm[FINGERS[f].tip], pip=lm[FINGERS[f].pip];
-  return tip.y < pip.y - 0.01; // y hacia arriba es menor
+/* ===== Dibujo ===== */
+function drawHand(lm,label){
+  const w=cv.width,h=cv.height; const P=i=>({x:lm[i].x*w,y:lm[i].y*h});
+  const bones=[[0,1,2,3,4],[0,5,6,7,8],[0,9,10,11,12],[0,13,14,15,16],[0,17,18,19,20]];
+  ctx.lineWidth=3; ctx.strokeStyle='rgba(102,217,239,.9)';
+  bones.forEach(b=>{ ctx.beginPath(); const p0=P(b[0]); ctx.moveTo(p0.x,p0.y); for(let k=1;k<b.length;k++){const p=P(b[k]); ctx.lineTo(p.x,p.y);} ctx.stroke(); });
+  ctx.fillStyle='#a6e22e'; for(let i=0;i<21;i++){ const p=P(i); ctx.beginPath(); ctx.arc(p.x,p.y,3,0,7); ctx.fill(); }
+  // etiqueta
+  const wri=P(0); ctx.fillStyle='rgba(14,21,34,.9)'; ctx.strokeStyle='#1e2a3e'; ctx.lineWidth=2; ctx.strokeRect(wri.x-10,wri.y-28,28,20); ctx.fillRect(wri.x-10,wri.y-28,28,20); ctx.fillStyle='#b9c7da'; ctx.fillText(label, wri.x-2, wri.y-14);
 }
-function palmWidth(lm){ const a=lm[5], b=lm[17]; return Math.hypot(a.x-b.x, a.y-b.y); }
-function fingerKey(handLabel, fname){ return handLabel+'_'+fname; }
 
-/* ===== Resultados de MediaPipe ===== */
+/* ===== Mapeos ===== */
+function pianoMap(handIdx, kbH){
+  const lm=state.smoothed[handIdx]; if(!lm) return;
+  const hand = state.hands[handIdx];
+  const strikeY = 1 - (kbH/cv.height) + 0.10*(kbH/cv.height);
+  const releaseY = strikeY - 0.05;
+
+  for(const fname of ['index','middle','ring','pinky']){
+    const tip=lm[FINGERS[fname].tip]; const tipX=xScreen(tip.x), tipY=tip.y;
+    const fstate=hand.fingers[fname];
+    const vDown = Math.max(0, tipY - (fstate.lastY||tipY)); fstate.lastY=tipY;
+    const ext=isExtended(lm,fname);
+    const touching = tipY>=strikeY;
+    const releasing = (tipY<releaseY) || !ext;
+    const keyId=fingerKey('H'+handIdx,fname);
+
+    if(ext && touching && !fstate.down){
+      fstate.down=true;
+      let midi=Math.floor(clamp(tipX,0,1)*(72-48))+48;
+      if(state.scale!=='free') midi=quant(midi,state.scale);
+      const vel=clamp(Math.round((vDown*900)+40),10,127);
+      noteOn(keyId,midi,vel,'piano'); fstate.note=midi;
+    }
+    if(fstate.down && releasing){
+      fstate.down=false; noteOff(keyId); fstate.note=null;
+    }
+  }
+}
+
+function synthMap(handIdx){
+  const lm=state.smoothed[handIdx]; if(!lm) return;
+  const keyId='s_'+handIdx;
+  const palm=Math.max(0.08, palmWidth(lm));
+  const pinch=Math.hypot(lm[8].x-lm[4].x, lm[8].y-lm[4].y)/palm;
+  const x=clamp(xScreen(lm[8].x),0,1);
+  let midi=Math.round(48+x*24); if(state.scale!=='free') midi=quant(midi,state.scale);
+  const vel=clamp(Math.round((1-clamp((pinch-0.1)/0.6,0,1))*127),1,127);
+  if(pinch<state.pinch && !state.notes.has(keyId)) noteOn(keyId,midi,vel,'synth');
+  else if(pinch>=state.pinch && state.notes.has(keyId)) noteOff(keyId);
+}
+
+function violinMap(handIdx, handed){
+  const lm=state.smoothed[handIdx]; if(!lm) return;
+  const label=(handed[handIdx]?.label||'Right'); // 'Left'/'Right'
+  const isLeft=(label==='Left');
+  const keyId=isLeft?'v_left':'v_right';
+  const y=clamp(lm[8].y,0,1);
+  const playing = isLeft || handed.length===1; // tono con izquierda o mano única
+  if(playing){
+    const m=48+(1-y)*36;
+    if(!state.notes.has(keyId)) noteOn(keyId,Math.round(m),100,'violin');
+    else audio.violin.frequency.setValueAtTime(midiToFreq(m), Tone.now());
+  }else{
+    if(state.notes.has(keyId)) noteOff(keyId);
+  }
+}
+
+/* ===== onResults ===== */
 function onResults(r){
   const now=performance.now(), dt=now-state.last; state.last=now;
   state.ft.push(dt); if(state.ft.length>30) state.ft.shift();
   const avg=state.ft.reduce((a,b)=>a+b,0)/state.ft.length;
-  set('fps', (1000/avg|0));
-  set('lat', (((audio.ctx?.baseLatency||0)*1000 + avg*0.5)|0)+' ms');
+  set('fps',(1000/avg|0)); set('lat',(((audio.ctx?.baseLatency||0)*1000+avg*0.5)|0)+' ms');
 
   ctx.clearRect(0,0,cv.width,cv.height);
+  // teclado visual
+  const kbH=Math.min(140, cv.height*0.22); ctx.fillStyle='rgba(255,255,255,.07)'; ctx.fillRect(0, cv.height-kbH, cv.width, kbH);
 
-  const hands=r.multiHandLandmarks||[];
-  const handed=r.multiHandedness||[];
-  if (hands.length>0) state.lastSeen = now;
+  const hands=r.multiHandLandmarks||[]; const handed=r.multiHandedness||[];
+  set('handsC', hands.length);
 
-  // Dibujar teclado (banda inferior)
-  const kbH=Math.min(140, cv.height*0.22);
-  ctx.fillStyle='rgba(255,255,255,.07)'; ctx.fillRect(0, cv.height-kbH, cv.width, kbH);
-  // cuadrículas de semitonos para feedback visual
-  ctx.strokeStyle='rgba(255,255,255,.12)'; ctx.lineWidth=1;
-  for(let k=0;k<24;k++){ const x=k*(cv.width/24); ctx.beginPath(); ctx.moveTo(x, cv.height-kbH); ctx.lineTo(x, cv.height); ctx.stroke();}
+  if(hands.length===0){
+    state.emptyFrames++; if(state.emptyFrames>3) { allOff(); } // ~> 3 frames sin manos
+    return;
+  }else{
+    state.emptyFrames=0; state.lastActive=now;
+  }
 
   for(let i=0;i<hands.length;i++){
     const lm=hands[i];
-    // suavizado EMA
     if(!state.smoothed[i]||state.smoothed[i].length!==21) state.smoothed[i]=new Array(21).fill(null);
-    for(let j=0;j<21;j++){
-      const prev=state.smoothed[i][j], c=lm[j];
-      state.smoothed[i][j]={x:ema(prev?.x,c.x,state.alpha), y:ema(prev?.y,c.y,state.alpha), z:ema(prev?.z,c.z,state.alpha)};
-    }
-
-    // etiqueta mano (ajustada a espejo)
-    const label=(handed[i]?.label||'Right'); // 'Left' | 'Right'
-    const isLeft = (label==='Left');
-    const visLabel = isLeft ? 'R' : 'L'; // lo que ve el usuario
-
-    // Dibuja esqueleto
+    for(let j=0;j<21;j++){ const prev=state.smoothed[i][j], c=lm[j]; state.smoothed[i][j]={x:ema(prev?.x,c.x,state.alpha), y:ema(prev?.y,c.y,state.alpha), z:ema(prev?.z,c.z,state.alpha)}; }
+    const visLabel = (handed[i]?.label==='Left')?'R':'L'; // para overlay (espejo)
     drawHand(state.smoothed[i], visLabel);
 
-    // Mapeos por instrumento
-    if (state.instr==='piano') pianoMap(i, label, kbH);
-    else if (state.instr==='synth') synthMap(i);
-    else if (state.instr==='violin') violinMap(i, handed);
+    if(state.instr==='piano') pianoMap(i, kbH);
+    else if(state.instr==='synth') synthMap(i);
+    else if(state.instr==='violin') violinMap(i, handed);
   }
 
-  // Auto-silencio si no hay manos desde hace >300 ms
-  if (hands.length===0 && (now - state.lastSeen) > 300){
-    if (state.notes.size) panic();
-  }
-}
-
-function drawHand(lm, label){
-  const w=cv.width,h=cv.height;
-  const P=i=>({x:lm[i].x*w,y:lm[i].y*h});
-  const bones=[[0,1,2,3,4],[0,5,6,7,8],[0,9,10,11,12],[0,13,14,15,16],[0,17,18,19,20]];
-  ctx.lineWidth=3; ctx.strokeStyle='rgba(102,217,239,.9)';
-  bones.forEach(b=>{ ctx.beginPath(); const p0=P(b[0]); ctx.moveTo(p0.x,p0.y); for(let k=1;k<b.length;k++){ const p=P(b[k]); ctx.lineTo(p.x,p.y);} ctx.stroke(); });
-  ctx.fillStyle='#a6e22e'; for(let i=0;i<21;i++){ const p=P(i); ctx.beginPath(); ctx.arc(p.x,p.y,3,0,7); ctx.fill(); }
-  // etiqueta L/R
-  ctx.fillStyle='rgba(14,21,34,.9)'; ctx.strokeStyle='#1e2a3e'; ctx.lineWidth=2;
-  const wri=P(0); ctx.strokeRect(wri.x-10,wri.y-28,28,20); ctx.fillRect(wri.x-10,wri.y-28,28,20);
-  ctx.fillStyle='#b9c7da'; ctx.fillText(label, wri.x-2, wri.y-14);
-}
-
-/* ===== Piano mapping con dedos independientes ===== */
-function pianoMap(handIdx, label, kbH){
-  const lm=state.smoothed[handIdx]; if(!lm) return;
-  const hand = state.hands[handIdx];
-  const strikeY = 1 - (kbH/cv.height) + 0.10*(kbH/cv.height); // umbral de ataque
-  const releaseY = strikeY - 0.05; // histeresis
-
-  for (const fname of ['index','middle','ring','pinky']){
-    const tip = lm[FINGERS[fname].tip];
-    const tipX = xScreen(tip.x), tipY = tip.y;
-    const fstate = hand.fingers[fname];
-    // velocidad vertical (down > 0)
-    const vDown = Math.max(0, tipY - (fstate.lastY||tipY));
-    fstate.lastY = tipY;
-
-    const ext = isExtended(lm, fname);
-    const touching = (tipY >= strikeY);
-    const releasing = (tipY < releaseY) || !ext;
-
-    const keyId = fingerKey(label, fname);
-
-    // NOTE ON: dedo extendido, entra en zona teclado y estaba arriba
-    if (ext && touching && !fstate.down){
-      fstate.down = true;
-      // mapea X a 2 octavas [48..72)
-      let midi = Math.floor(clamp(tipX,0,1)*(72-48)) + 48;
-      if (state.scale!=='free') midi = quant(midi, state.scale);
-      // velocity a partir de vDown (amplificada)
-      const vel = clamp(Math.round((vDown*900) + 40), 10, 127);
-      noteOn(keyId, midi, vel, 'piano');
-      fstate.note = midi;
-    }
-
-    // NOTE OFF: sube por encima de release o recoge el dedo
-    if (fstate.down && releasing){
-      fstate.down = false;
-      noteOff(keyId);
-      fstate.note = null;
-    }
+  // seguridad: si violin no tiene ya condiciones, suelta claves que no se actualizaron
+  if(state.instr==='violin'){
+    if(!handed.some(h=>h.label==='Left') && state.notes.has('v_left')) noteOff('v_left');
+    if(handed.length>1 && !handed.some(h=>h.label==='Right') && state.notes.has('v_right')) noteOff('v_right');
   }
 }
 
-/* ===== Synth (pinch robusto por palma) ===== */
-function synthMap(handIdx){
-  const lm=state.smoothed[handIdx]; if(!lm) return;
-  const keyId='s_'+handIdx;
-  const palm = Math.max(0.08, palmWidth(lm));
-  const pinch = Math.hypot(lm[8].x-lm[4].x, lm[8].y-lm[4].y)/palm;
-  const x = clamp(xScreen(lm[8].x),0,1);
-  let midi = Math.round(48 + x*24);
-  if (state.scale!=='free') midi = quant(midi, state.scale);
-  const vel = clamp(Math.round((1-clamp((pinch-0.1)/0.6,0,1))*127),1,127);
-  if (pinch < state.pinch && !state.notes.has(keyId)) noteOn(keyId, midi, vel, 'synth');
-  else if (pinch >= state.pinch && state.notes.has(keyId)) noteOff(keyId);
-}
-
-/* ===== Violín (gliss continuo + auto-silencio ya global) ===== */
-function violinMap(handIdx, handed){
-  const lm=state.smoothed[handIdx]; if(!lm) return;
-  const label=(handed[handIdx]?.label||'Right');
-  const isLeft = (label==='Left');
-  // si hay 1 sola mano o es la izquierda → tono
-  if (isLeft || handed.length===1){
-    const keyId='v';
-    const y=clamp(lm[8].y,0,1);
-    const m = 48 + (1-y)*36;
-    if (!state.notes.has(keyId)) noteOn(keyId, Math.round(m), 100, 'violin');
-    else audio.violin.frequency.setValueAtTime(midiToFreq(m), Tone.now());
-  }
-}
-
-/* ===== UI ===== */
+/* ===== UI / eventos ===== */
 const btnToggle=document.getElementById('btnToggle');
-document.getElementById('btnPiano').onclick=()=>state.instr='piano';
-document.getElementById('btnViolin').onclick=()=>state.instr='violin';
-document.getElementById('btnSynth').onclick=()=>state.instr='synth';
+document.getElementById('btnPiano').onclick=()=>setInstr('piano');
+document.getElementById('btnViolin').onclick=()=>setInstr('violin');
+document.getElementById('btnSynth').onclick=()=>setInstr('synth');
 document.getElementById('scaleSel').onchange=(e)=> state.scale=e.target.value;
 document.getElementById('pinchThresh').oninput=(e)=> state.pinch=parseFloat(e.target.value);
-document.getElementById('btnPanic').onclick=panic;
-document.getElementById('btnDiag').onclick=async()=>{
-  try{ const id=document.getElementById('camSel').value;
-    const s=await navigator.mediaDevices.getUserMedia({video:id?{deviceId:{exact:id}}:true}); s.getTracks().forEach(t=>t.stop());
-    banner('Diagnóstico OK: cámara accesible'); }catch(e){ banner('Diagnóstico: '+e.name); }
-};
+document.getElementById('btnPanic').onclick=allOff;
 document.getElementById('camSel').onchange=()=>{ if(state.running){ stopCam(); startCam(); } };
-window.addEventListener('keydown', async (e)=>{
-  if (e.code==='Digit1') state.instr='piano';
-  if (e.code==='Digit2') state.instr='violin';
-  if (e.code==='Digit3') state.instr='synth';
-  if (e.code==='Space'){ e.preventDefault(); if(!state.running){ await startCam(); btnToggle.textContent='Detener cámara'; } else { stopCam(); btnToggle.textContent='Iniciar cámara'; } }
-});
-window.addEventListener('visibilitychange', ()=>{ if(document.hidden) panic(); });
+document.getElementById('btnToggle').onclick=async()=>{ if(!state.running){ await startCam(); btnToggle.textContent='Detener cámara'; } else { stopCam(); btnToggle.textContent='Iniciar cámara'; } };
+window.addEventListener('keydown', async (e)=>{ if(e.code==='Digit1')setInstr('piano'); if(e.code==='Digit2')setInstr('violin'); if(e.code==='Digit3')setInstr('synth'); if(e.code==='Space'){ e.preventDefault(); if(!state.running){ await startCam(); btnToggle.textContent='Detener cámara'; } else { stopCam(); btnToggle.textContent='Iniciar cámara'; } } });
+window.addEventListener('visibilitychange', ()=>{ if(document.hidden) allOff(); });
+
+// Heartbeat: si por lo que sea no llegan resultados durante 300 ms, silencio.
+setInterval(()=>{ if(state.running && performance.now()-state.lastActive>350) allOff(); }, 150);
 
 /* ===== Boot ===== */
-(async function boot(){
-  resize(); listCams();
-  const handsOK = await ensureHands();
-  if(!handsOK) console.warn('MediaPipe no cargó; se verá vídeo pero sin tracking.');
-})();
+(async function boot(){ resize(); listCams(); const handsOK=await ensureHands(); if(!handsOK) console.warn('MediaPipe no cargó; sin tracking.'); })();
 </script>
 </body>
 </html>
